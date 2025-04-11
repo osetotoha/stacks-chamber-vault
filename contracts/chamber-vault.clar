@@ -907,3 +907,100 @@
   )
 )
 
+;; Check if chamber is eligible for cancellation
+(define-read-only (is-eligible-for-cancellation (chamber-id uint))
+  (let
+    (
+      (chamber-record (map-get? ChamberRepository { chamber-id: chamber-id }))
+    )
+    (if (is-none chamber-record)
+      false
+      (let
+        (
+          (unwrapped-record (unwrap-panic chamber-record))
+          (status (get chamber-status unwrapped-record))
+        )
+        (is-eq status "pending")
+      )
+    )
+  )
+)
+;; Add two-factor authentication for high-value chamber operations
+(define-public (enable-two-factor-auth (chamber-id uint) (auth-code (buff 32)) (recovery-key (buff 32)))
+  (begin
+    (asserts! (valid-chamber-id? chamber-id) ERROR_INVALID_IDENTIFIER)
+    (let
+      (
+        (chamber-record (unwrap! (map-get? ChamberRepository { chamber-id: chamber-id }) ERROR_NO_CHAMBER))
+        (initiator (get initiator chamber-record))
+        (quantity (get quantity chamber-record))
+        (threshold u5000) ;; 5000 STX threshold for requiring 2FA
+      )
+      (asserts! (is-eq tx-sender initiator) ERROR_PERMISSION_DENIED)
+      (asserts! (> quantity threshold) (err u220)) ;; Only high-value chambers need 2FA
+      (asserts! (is-eq (get chamber-status chamber-record) "pending") ERROR_ALREADY_PROCESSED)
+      (asserts! (not (is-eq (hash160 auth-code) (hash160 recovery-key))) (err u221)) ;; Auth code and recovery key must differ
+
+      ;; Store hash of the auth code for later verification (in production)
+      ;; For now, just print the action
+      (print {action: "two_factor_enabled", chamber-id: chamber-id, initiator: initiator, 
+              auth-hash: (hash160 auth-code), recovery-hash: (hash160 recovery-key)})
+      (ok true)
+    )
+  )
+)
+
+;; Apply rate limiting to prevent transaction flooding
+(define-public (apply-operation-rate-limit (principal-id principal) (operation-type (string-ascii 20)))
+  (begin
+    (asserts! (is-eq tx-sender PROTOCOL_GUARDIAN) ERROR_PERMISSION_DENIED)
+    (let
+      (
+        (current-block block-height)
+        (cooldown-period u12) ;; 12 blocks (~2 hours) cooldown
+        (max-operations-per-window u5) ;; 5 operations per window maximum
+      )
+      ;; Validate operation type
+      (asserts! (or 
+                 (is-eq operation-type "chamber-creation")
+                 (is-eq operation-type "chamber-transfer")
+                 (is-eq operation-type "challenge")
+                 (is-eq operation-type "verification")) (err u240))
+
+      ;; In production, would check against stored operation count and timestamps
+      ;; Here we just demonstrate the concept
+
+      (print {action: "rate_limit_applied", target-principal: principal-id, operation-type: operation-type,
+              cooldown-period: cooldown-period, max-operations: max-operations-per-window, 
+              current-block: current-block, next-available-block: (+ current-block cooldown-period)})
+      (ok max-operations-per-window)
+    )
+  )
+)
+
+;; Cancel protective challenge
+(define-public (cancel-protective-challenge (chamber-id uint))
+  (begin
+    (asserts! (valid-chamber-id? chamber-id) ERROR_INVALID_IDENTIFIER)
+    (let
+      (
+        (chamber-record (unwrap! (map-get? ChamberRepository { chamber-id: chamber-id }) ERROR_NO_CHAMBER))
+        (initiator (get initiator chamber-record))
+        (beneficiary (get beneficiary chamber-record))
+        (status (get chamber-status chamber-record))
+      )
+      ;; Must be called by initiator
+      (asserts! (is-eq tx-sender initiator) ERROR_PERMISSION_DENIED)
+      ;; Only for challenged chambers
+      (asserts! (is-eq status "challenged") (err u230))
+
+      ;; Update status to active
+      (map-set ChamberRepository
+        { chamber-id: chamber-id }
+        (merge chamber-record { chamber-status: "active" })
+      )
+
+      (ok true)
+    )
+  )
+)
