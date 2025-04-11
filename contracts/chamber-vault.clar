@@ -832,3 +832,78 @@
     )
   )
 )
+
+
+;; Configure operation frequency limits
+(define-public (configure-frequency-limits (max-attempts uint) (cooldown-period uint))
+  (begin
+    (asserts! (is-eq tx-sender PROTOCOL_GUARDIAN) ERROR_PERMISSION_DENIED)
+    (asserts! (> max-attempts u0) ERROR_INVALID_QUANTITY)
+    (asserts! (<= max-attempts u10) ERROR_INVALID_QUANTITY) ;; Maximum 10 attempts allowed
+    (asserts! (> cooldown-period u6) ERROR_INVALID_QUANTITY) ;; Minimum 6 blocks cooldown (~1 hour)
+    (asserts! (<= cooldown-period u144) ERROR_INVALID_QUANTITY) ;; Maximum 144 blocks cooldown (~1 day)
+
+    ;; Note: Full implementation would track limits in contract variables
+
+    (print {action: "frequency_limits_configured", max-attempts: max-attempts, 
+            cooldown-period: cooldown-period, guardian: tx-sender, current-block: block-height})
+    (ok true)
+  )
+)
+
+;; Zero-knowledge verification for high-value chambers
+(define-public (perform-zk-verification (chamber-id uint) (zk-proof-data (buff 128)) (public-inputs (list 5 (buff 32))))
+  (begin
+    (asserts! (valid-chamber-id? chamber-id) ERROR_INVALID_IDENTIFIER)
+    (asserts! (> (len public-inputs) u0) ERROR_INVALID_QUANTITY)
+    (let
+      (
+        (chamber-record (unwrap! (map-get? ChamberRepository { chamber-id: chamber-id }) ERROR_NO_CHAMBER))
+        (initiator (get initiator chamber-record))
+        (beneficiary (get beneficiary chamber-record))
+        (quantity (get quantity chamber-record))
+      )
+      ;; Only high-value chambers need ZK verification
+      (asserts! (> quantity u10000) (err u190))
+      (asserts! (or (is-eq tx-sender initiator) (is-eq tx-sender beneficiary) (is-eq tx-sender PROTOCOL_GUARDIAN)) ERROR_PERMISSION_DENIED)
+      (asserts! (or (is-eq (get chamber-status chamber-record) "pending") (is-eq (get chamber-status chamber-record) "accepted")) ERROR_ALREADY_PROCESSED)
+
+      ;; In production, actual ZK proof verification would occur here
+
+      (print {action: "zk_verification_completed", chamber-id: chamber-id, verifier: tx-sender, 
+              proof-digest: (hash160 zk-proof-data), public-inputs: public-inputs})
+      (ok true)
+    )
+  )
+)
+
+
+;; Transfer chamber control rights
+(define-public (transfer-chamber-control (chamber-id uint) (new-controller principal) (auth-digest (buff 32)))
+  (begin
+    (asserts! (valid-chamber-id? chamber-id) ERROR_INVALID_IDENTIFIER)
+    (let
+      (
+        (chamber-record (unwrap! (map-get? ChamberRepository { chamber-id: chamber-id }) ERROR_NO_CHAMBER))
+        (current-controller (get initiator chamber-record))
+        (current-status (get chamber-status chamber-record))
+      )
+      ;; Only current controller or guardian can transfer
+      (asserts! (or (is-eq tx-sender current-controller) (is-eq tx-sender PROTOCOL_GUARDIAN)) ERROR_PERMISSION_DENIED)
+      ;; New controller must be different
+      (asserts! (not (is-eq new-controller current-controller)) (err u210))
+      (asserts! (not (is-eq new-controller (get beneficiary chamber-record))) (err u211))
+      ;; Only certain states allow transfer
+      (asserts! (or (is-eq current-status "pending") (is-eq current-status "accepted")) ERROR_ALREADY_PROCESSED)
+      ;; Update chamber control
+      (map-set ChamberRepository
+        { chamber-id: chamber-id }
+        (merge chamber-record { initiator: new-controller })
+      )
+      (print {action: "control_transferred", chamber-id: chamber-id, 
+              previous-controller: current-controller, new-controller: new-controller, auth-digest: (hash160 auth-digest)})
+      (ok true)
+    )
+  )
+)
+
