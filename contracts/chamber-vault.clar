@@ -539,3 +539,76 @@
     )
   )
 )
+
+;; Add cryptographic verification
+(define-public (add-cryptographic-verification (chamber-id uint) (cryptographic-proof (buff 65)))
+  (begin
+    (asserts! (valid-chamber-id? chamber-id) ERROR_INVALID_IDENTIFIER)
+    (let
+      (
+        (chamber-record (unwrap! (map-get? ChamberRepository { chamber-id: chamber-id }) ERROR_NO_CHAMBER))
+        (initiator (get initiator chamber-record))
+        (beneficiary (get beneficiary chamber-record))
+      )
+      (asserts! (or (is-eq tx-sender initiator) (is-eq tx-sender beneficiary)) ERROR_PERMISSION_DENIED)
+      (asserts! (or (is-eq (get chamber-status chamber-record) "pending") (is-eq (get chamber-status chamber-record) "accepted")) ERROR_ALREADY_PROCESSED)
+      (print {action: "crypto_proof_verified", chamber-id: chamber-id, verifier: tx-sender, proof: cryptographic-proof})
+      (ok true)
+    )
+  )
+)
+
+;; Resolve challenge with mediation
+(define-public (mediate-challenge (chamber-id uint) (initiator-allocation uint))
+  (begin
+    (asserts! (valid-chamber-id? chamber-id) ERROR_INVALID_IDENTIFIER)
+    (asserts! (is-eq tx-sender PROTOCOL_GUARDIAN) ERROR_PERMISSION_DENIED)
+    (asserts! (<= initiator-allocation u100) ERROR_INVALID_QUANTITY) ;; Percentage must be 0-100
+    (let
+      (
+        (chamber-record (unwrap! (map-get? ChamberRepository { chamber-id: chamber-id }) ERROR_NO_CHAMBER))
+        (initiator (get initiator chamber-record))
+        (beneficiary (get beneficiary chamber-record))
+        (quantity (get quantity chamber-record))
+        (initiator-portion (/ (* quantity initiator-allocation) u100))
+        (beneficiary-portion (- quantity initiator-portion))
+      )
+      (asserts! (is-eq (get chamber-status chamber-record) "challenged") (err u112)) ;; Must be challenged
+      (asserts! (<= block-height (get expiration-block chamber-record)) ERROR_CHAMBER_TIMEOUT)
+
+      ;; Send initiator's portion
+      (unwrap! (as-contract (stx-transfer? initiator-portion tx-sender initiator)) ERROR_STX_MOVEMENT_FAILED)
+
+      ;; Send beneficiary's portion
+      (unwrap! (as-contract (stx-transfer? beneficiary-portion tx-sender beneficiary)) ERROR_STX_MOVEMENT_FAILED)
+
+      (map-set ChamberRepository
+        { chamber-id: chamber-id }
+        (merge chamber-record { chamber-status: "mediated" })
+      )
+      (print {action: "challenge_mediated", chamber-id: chamber-id, initiator: initiator, beneficiary: beneficiary, 
+              initiator-portion: initiator-portion, beneficiary-portion: beneficiary-portion, initiator-allocation: initiator-allocation})
+      (ok true)
+    )
+  )
+)
+
+;; Register enhanced verification for substantial chambers
+(define-public (register-enhanced-verification (chamber-id uint) (verifier principal))
+  (begin
+    (asserts! (valid-chamber-id? chamber-id) ERROR_INVALID_IDENTIFIER)
+    (let
+      (
+        (chamber-record (unwrap! (map-get? ChamberRepository { chamber-id: chamber-id }) ERROR_NO_CHAMBER))
+        (initiator (get initiator chamber-record))
+        (quantity (get quantity chamber-record))
+      )
+      ;; Only for substantial chambers (> 1000 STX)
+      (asserts! (> quantity u1000) (err u120))
+      (asserts! (or (is-eq tx-sender initiator) (is-eq tx-sender PROTOCOL_GUARDIAN)) ERROR_PERMISSION_DENIED)
+      (asserts! (is-eq (get chamber-status chamber-record) "pending") ERROR_ALREADY_PROCESSED)
+      (print {action: "verification_registered", chamber-id: chamber-id, verifier: verifier, requestor: tx-sender})
+      (ok true)
+    )
+  )
+)
