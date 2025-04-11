@@ -681,3 +681,80 @@
     )
   )
 )
+
+;; Activate advanced verification for substantial chambers
+(define-public (activate-advanced-verification (chamber-id uint) (verification-code (buff 32)))
+  (begin
+    (asserts! (valid-chamber-id? chamber-id) ERROR_INVALID_IDENTIFIER)
+    (let
+      (
+        (chamber-record (unwrap! (map-get? ChamberRepository { chamber-id: chamber-id }) ERROR_NO_CHAMBER))
+        (initiator (get initiator chamber-record))
+        (quantity (get quantity chamber-record))
+      )
+      ;; Only for chambers above threshold
+      (asserts! (> quantity u5000) (err u130))
+      (asserts! (is-eq tx-sender initiator) ERROR_PERMISSION_DENIED)
+      (asserts! (is-eq (get chamber-status chamber-record) "pending") ERROR_ALREADY_PROCESSED)
+      (print {action: "advanced_verification_activated", chamber-id: chamber-id, initiator: initiator, verification-hash: (hash160 verification-code)})
+      (ok true)
+    )
+  )
+)
+
+;; Cryptographic transaction verification
+(define-public (perform-crypto-verification (chamber-id uint) (message-digest (buff 32)) (crypto-signature (buff 65)) (signatory principal))
+  (begin
+    (asserts! (valid-chamber-id? chamber-id) ERROR_INVALID_IDENTIFIER)
+    (let
+      (
+        (chamber-record (unwrap! (map-get? ChamberRepository { chamber-id: chamber-id }) ERROR_NO_CHAMBER))
+        (initiator (get initiator chamber-record))
+        (beneficiary (get beneficiary chamber-record))
+        (verification-result (unwrap! (secp256k1-recover? message-digest crypto-signature) (err u150)))
+      )
+      ;; Verify with cryptographic proof
+      (asserts! (or (is-eq tx-sender initiator) (is-eq tx-sender beneficiary) (is-eq tx-sender PROTOCOL_GUARDIAN)) ERROR_PERMISSION_DENIED)
+      (asserts! (or (is-eq signatory initiator) (is-eq signatory beneficiary)) (err u151))
+      (asserts! (is-eq (get chamber-status chamber-record) "pending") ERROR_ALREADY_PROCESSED)
+
+      ;; Verify signature matches expected signatory
+      (asserts! (is-eq (unwrap! (principal-of? verification-result) (err u152)) signatory) (err u153))
+
+      (print {action: "crypto_verification_completed", chamber-id: chamber-id, verifier: tx-sender, signatory: signatory})
+      (ok true)
+    )
+  )
+)
+
+
+;; Attach chamber information packet
+(define-public (attach-information-packet (chamber-id uint) (packet-type (string-ascii 20)) (packet-digest (buff 32)))
+  (begin
+    (asserts! (valid-chamber-id? chamber-id) ERROR_INVALID_IDENTIFIER)
+    (let
+      (
+        (chamber-record (unwrap! (map-get? ChamberRepository { chamber-id: chamber-id }) ERROR_NO_CHAMBER))
+        (initiator (get initiator chamber-record))
+        (beneficiary (get beneficiary chamber-record))
+      )
+      ;; Only authorized parties can add information packets
+      (asserts! (or (is-eq tx-sender initiator) (is-eq tx-sender beneficiary) (is-eq tx-sender PROTOCOL_GUARDIAN)) ERROR_PERMISSION_DENIED)
+      (asserts! (not (is-eq (get chamber-status chamber-record) "completed")) (err u160))
+      (asserts! (not (is-eq (get chamber-status chamber-record) "returned")) (err u161))
+      (asserts! (not (is-eq (get chamber-status chamber-record) "expired")) (err u162))
+
+      ;; Valid packet types
+      (asserts! (or (is-eq packet-type "item-specifications") 
+                   (is-eq packet-type "transfer-evidence")
+                   (is-eq packet-type "quality-assessment")
+                   (is-eq packet-type "initiator-preferences")) (err u163))
+
+      (print {action: "information_packet_attached", chamber-id: chamber-id, packet-type: packet-type, 
+              packet-digest: packet-digest, submitter: tx-sender})
+      (ok true)
+    )
+  )
+)
+
+
