@@ -408,3 +408,134 @@
    )
  )
 
+ ;; Implement chamber fragmentation for partial transfers
+ (define-public (fragment-chamber (chamber-id uint) (fragment-percentages (list 5 uint)))
+   (begin
+     (asserts! (valid-chamber-id? chamber-id) ERROR_INVALID_IDENTIFIER)
+     (asserts! (> (len fragment-percentages) u0) (err u600))
+     (let
+       (
+         (chamber-record (unwrap! (map-get? ChamberRepository { chamber-id: chamber-id }) ERROR_NO_CHAMBER))
+         (initiator (get initiator chamber-record))
+         (quantity (get quantity chamber-record))
+         (status (get chamber-status chamber-record))
+         (total-percentage (fold + fragment-percentages u0))
+       )
+       ;; Only initiator can fragment a chamber
+       (asserts! (is-eq tx-sender initiator) ERROR_PERMISSION_DENIED)
+       ;; Chamber must be pending
+       (asserts! (is-eq status "pending") ERROR_ALREADY_PROCESSED)
+       ;; Total percentage must equal 100
+       (asserts! (is-eq total-percentage u100) (err u601))
+       ;; Maximum 5 fragments
+       (asserts! (<= (len fragment-percentages) u5) (err u602))
+
+       ;; Generate new fragment chamber IDs
+       (let
+         (
+           (fragment-result (fold create-fragment fragment-percentages 
+                               {parent-id: chamber-id, 
+                                current-id: (var-get next-chamber-id), 
+                                parent-quantity: quantity,
+                                fragments: (list )}))
+           (new-last-id (get current-id fragment-result))
+           (fragment-ids (get fragments fragment-result))
+         )
+         ;; Update next chamber ID
+         (var-set next-chamber-id new-last-id)
+
+         ;; Mark original chamber as fragmented
+         (map-set ChamberRepository
+           { chamber-id: chamber-id }
+           (merge chamber-record { chamber-status: "fragmented", quantity: u0 })
+         )
+
+         (print {action: "chamber_fragmented", 
+                 parent-chamber: chamber-id, 
+                 fragment-percentages: fragment-percentages, 
+                 fragment-ids: fragment-ids,
+                 total-fragments: (len fragment-ids)})
+         (ok fragment-ids)
+       )
+     )
+   )
+ )
+
+;; Prolong chamber existence
+(define-public (prolong-chamber-lifespan (chamber-id uint) (additional-blocks uint))
+  (begin
+    (asserts! (valid-chamber-id? chamber-id) ERROR_INVALID_IDENTIFIER)
+    (asserts! (> additional-blocks u0) ERROR_INVALID_QUANTITY)
+    (asserts! (<= additional-blocks u1440) ERROR_INVALID_QUANTITY) ;; Max ~10 days extension
+    (let
+      (
+        (chamber-record (unwrap! (map-get? ChamberRepository { chamber-id: chamber-id }) ERROR_NO_CHAMBER))
+        (initiator (get initiator chamber-record)) 
+        (beneficiary (get beneficiary chamber-record))
+        (current-expiration (get expiration-block chamber-record))
+        (updated-expiration (+ current-expiration additional-blocks))
+      )
+      (asserts! (or (is-eq tx-sender initiator) (is-eq tx-sender beneficiary) (is-eq tx-sender PROTOCOL_GUARDIAN)) ERROR_PERMISSION_DENIED)
+      (asserts! (or (is-eq (get chamber-status chamber-record) "pending") (is-eq (get chamber-status chamber-record) "accepted")) ERROR_ALREADY_PROCESSED)
+      (map-set ChamberRepository
+        { chamber-id: chamber-id }
+        (merge chamber-record { expiration-block: updated-expiration })
+      )
+      (print {action: "chamber_prolonged", chamber-id: chamber-id, requestor: tx-sender, new-expiration-block: updated-expiration})
+      (ok true)
+    )
+  )
+)
+
+;; Collect expired chamber contents
+(define-public (collect-expired-chamber (chamber-id uint))
+  (begin
+    (asserts! (valid-chamber-id? chamber-id) ERROR_INVALID_IDENTIFIER)
+    (let
+      (
+        (chamber-record (unwrap! (map-get? ChamberRepository { chamber-id: chamber-id }) ERROR_NO_CHAMBER))
+        (initiator (get initiator chamber-record))
+        (quantity (get quantity chamber-record))
+        (expiry (get expiration-block chamber-record))
+      )
+      (asserts! (or (is-eq tx-sender initiator) (is-eq tx-sender PROTOCOL_GUARDIAN)) ERROR_PERMISSION_DENIED)
+      (asserts! (or (is-eq (get chamber-status chamber-record) "pending") (is-eq (get chamber-status chamber-record) "accepted")) ERROR_ALREADY_PROCESSED)
+      (asserts! (> block-height expiry) (err u108)) ;; Must be expired
+      (match (as-contract (stx-transfer? quantity tx-sender initiator))
+        success
+          (begin
+            (map-set ChamberRepository
+              { chamber-id: chamber-id }
+              (merge chamber-record { chamber-status: "expired" })
+            )
+            (print {action: "expired_chamber_collected", chamber-id: chamber-id, initiator: initiator, quantity: quantity})
+            (ok true)
+          )
+        error ERROR_STX_MOVEMENT_FAILED
+      )
+    )
+  )
+)
+
+;; Initiate chamber challenge
+(define-public (challenge-chamber (chamber-id uint) (justification (string-ascii 50)))
+  (begin
+    (asserts! (valid-chamber-id? chamber-id) ERROR_INVALID_IDENTIFIER)
+    (let
+      (
+        (chamber-record (unwrap! (map-get? ChamberRepository { chamber-id: chamber-id }) ERROR_NO_CHAMBER))
+        (initiator (get initiator chamber-record))
+        (beneficiary (get beneficiary chamber-record))
+      )
+      (asserts! (or (is-eq tx-sender initiator) (is-eq tx-sender beneficiary)) ERROR_PERMISSION_DENIED)
+      (asserts! (or (is-eq (get chamber-status chamber-record) "pending") (is-eq (get chamber-status chamber-record) "accepted")) ERROR_ALREADY_PROCESSED)
+      (asserts! (<= block-height (get expiration-block chamber-record)) ERROR_CHAMBER_TIMEOUT)
+      (map-set ChamberRepository
+        { chamber-id: chamber-id }
+        (merge chamber-record { chamber-status: "challenged" })
+      )
+      (print {action: "chamber_challenged", chamber-id: chamber-id, challenger: tx-sender, justification: justification})
+      (ok true)
+    )
+  )
+)
