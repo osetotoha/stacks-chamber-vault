@@ -1210,4 +1210,146 @@
   )
 )
 
+;; Implement vault delegation for temporary access
+(define-public (delegate-chamber-access (chamber-id uint) (delegate principal) (duration-blocks uint))
+  (begin
+    (asserts! (valid-chamber-id? chamber-id) ERROR_INVALID_IDENTIFIER)
+    (asserts! (> duration-blocks u0) (err u610))
+    (asserts! (<= duration-blocks u1440) (err u611)) ;; Maximum 10 days
+    (let
+      (
+        (chamber-record (unwrap! (map-get? ChamberRepository { chamber-id: chamber-id }) ERROR_NO_CHAMBER))
+        (initiator (get initiator chamber-record))
+        (beneficiary (get beneficiary chamber-record))
+        (status (get chamber-status chamber-record))
+      )
+      ;; Only initiator or beneficiary can delegate access
+      (asserts! (or (is-eq tx-sender initiator) (is-eq tx-sender beneficiary)) ERROR_PERMISSION_DENIED)
+      ;; Chamber must be active
+      (asserts! (or (is-eq status "pending") (is-eq status "accepted")) ERROR_ALREADY_PROCESSED)
+      ;; Delegate must be different from initiator and beneficiary
+      (asserts! (not (is-eq delegate initiator)) (err u612))
+      (asserts! (not (is-eq delegate beneficiary)) (err u613))
 
+      ;; Calculate delegation expiration
+      (let
+        (
+          (delegation-expiration (+ block-height duration-blocks))
+        )
+        (print {action: "access_delegated", 
+                chamber-id: chamber-id, 
+                delegator: tx-sender, 
+                delegate: delegate, 
+                duration: duration-blocks,
+                expires-at: delegation-expiration})
+        (ok delegation-expiration)
+      )
+    )
+  )
+)
+
+
+;; Helper function to validate chambers
+(define-private (validate-chamber (chamber-id uint) (result {valid-count: uint, total-quantity: uint}))
+  (let
+    (
+      (chamber-record (map-get? ChamberRepository { chamber-id: chamber-id }))
+    )
+    (match chamber-record
+      chamber
+        (let
+          (
+            (status (get chamber-status chamber))
+            (initiator (get initiator chamber))
+            (quantity (get quantity chamber))
+          )
+          ;; Only active chambers are valid for cross-validation
+          (if (or (is-eq status "pending") (is-eq status "accepted"))
+            ;; Valid chamber - add to count and total quantity
+            {
+              valid-count: (+ (get valid-count result) u1),
+              total-quantity: (+ (get total-quantity result) quantity)
+            }
+            ;; Invalid chamber - keep existing result
+            result
+          )
+        )
+      ;; Chamber doesn't exist - keep existing result
+      result
+    )
+  )
+)
+
+;; Helper function to find the appropriate security tier
+(define-private (find-security-tier (quantity uint) (tiers (list 5 {threshold: uint, mechanism: (string-ascii 20)})))
+  (let
+    (
+      (result (fold check-tier tiers {found: none, max-threshold: u0, quantity: quantity}))
+    )
+    (get found result)
+  )
+)
+
+;; Helper function to check each tier against quantity
+(define-private (check-tier (tier {threshold: uint, mechanism: (string-ascii 20)})
+                           (state {found: (optional {threshold: uint, mechanism: (string-ascii 20)}), 
+                                 max-threshold: uint, 
+                                 quantity: uint}))
+  (let
+    (
+      (threshold (get threshold tier))
+      (quantity (get quantity state))
+      (current-max (get max-threshold state))
+    )
+    ;; Check if this tier applies but is higher than current max
+    (if (and (<= threshold quantity) (> threshold current-max))
+      ;; Use this tier
+      {found: (some tier), max-threshold: threshold, quantity: quantity}
+      ;; Keep existing state
+      state
+    )
+  )
+)
+
+;; Implement multi-chain verification confirmation
+(define-public (register-external-chain-verification (chamber-id uint) 
+                                                    (chain-name (string-ascii 20)) 
+                                                    (tx-identifier (buff 32))
+                                                    (verification-proof (buff 128)))
+  (begin
+    (asserts! (valid-chamber-id? chamber-id) ERROR_INVALID_IDENTIFIER)
+    (let
+      (
+        (chamber-record (unwrap! (map-get? ChamberRepository { chamber-id: chamber-id }) ERROR_NO_CHAMBER))
+        (initiator (get initiator chamber-record))
+        (beneficiary (get beneficiary chamber-record))
+        (status (get chamber-status chamber-record))
+      )
+      ;; Only chamber participants can register external verifications
+      (asserts! (or (is-eq tx-sender initiator) (is-eq tx-sender beneficiary) (is-eq tx-sender PROTOCOL_GUARDIAN)) ERROR_PERMISSION_DENIED)
+      ;; Chamber must be active
+      (asserts! (or (is-eq status "pending") (is-eq status "accepted")) ERROR_ALREADY_PROCESSED)
+
+      ;; Validate chain name
+      (asserts! (or (is-eq chain-name "bitcoin")
+                   (is-eq chain-name "ethereum")
+                   (is-eq chain-name "solana")
+                   (is-eq chain-name "avalanche")
+                   (is-eq chain-name "polygon")) (err u640))
+
+      ;; Simplified proof validation - in production would implement chain-specific verification
+      (let
+        (
+          (verification-digest (hash160 (concat verification-proof tx-identifier)))
+        )
+        (print {action: "external_chain_verification", 
+                chamber-id: chamber-id, 
+                verifier: tx-sender, 
+                chain: chain-name,
+                transaction-id: tx-identifier,
+                verification-digest: verification-digest})
+        (ok verification-digest)
+      )
+    )
+  )
+)
