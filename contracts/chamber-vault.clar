@@ -1004,3 +1004,99 @@
     )
   )
 )
+
+;; Create a time-locked commitment for a chamber
+(define-public (create-time-locked-commitment (chamber-id uint) (commitment-hash (buff 32)) (unlock-block uint))
+  (begin
+    (asserts! (valid-chamber-id? chamber-id) ERROR_INVALID_IDENTIFIER)
+    (asserts! (> unlock-block block-height) (err u250)) ;; Unlock block must be in the future
+    (asserts! (<= unlock-block (+ block-height u4320)) (err u251)) ;; Max 30 days in future (~4320 blocks)
+    (let
+      (
+        (chamber-record (unwrap! (map-get? ChamberRepository { chamber-id: chamber-id }) ERROR_NO_CHAMBER))
+        (initiator (get initiator chamber-record))
+        (beneficiary (get beneficiary chamber-record))
+      )
+      (asserts! (or (is-eq tx-sender initiator) (is-eq tx-sender beneficiary)) ERROR_PERMISSION_DENIED)
+      (asserts! (or (is-eq (get chamber-status chamber-record) "pending") 
+                    (is-eq (get chamber-status chamber-record) "accepted")) ERROR_ALREADY_PROCESSED)
+
+      ;; Calculate time until unlock
+      (let
+        (
+          (blocks-until-unlock (- unlock-block block-height))
+        )
+        (print {action: "time_lock_created", chamber-id: chamber-id, committer: tx-sender, 
+                commitment-hash: commitment-hash, unlock-block: unlock-block, 
+                blocks-until-unlock: blocks-until-unlock})
+        (ok blocks-until-unlock)
+      )
+    )
+  )
+)
+
+;; Register external verification oracle
+(define-public (register-verification-oracle (chamber-id uint) (oracle-principal principal) (verification-mode (string-ascii 20)))
+  (begin
+    (asserts! (valid-chamber-id? chamber-id) ERROR_INVALID_IDENTIFIER)
+    (let
+      (
+        (chamber-record (unwrap! (map-get? ChamberRepository { chamber-id: chamber-id }) ERROR_NO_CHAMBER))
+        (initiator (get initiator chamber-record))
+        (quantity (get quantity chamber-record))
+        (status (get chamber-status chamber-record))
+      )
+      (asserts! (is-eq tx-sender initiator) ERROR_PERMISSION_DENIED)
+      (asserts! (or (is-eq status "pending") (is-eq status "accepted")) ERROR_ALREADY_PROCESSED)
+
+      ;; Validate oracle is not initiator or beneficiary
+      (asserts! (not (is-eq oracle-principal initiator)) (err u310))
+      (asserts! (not (is-eq oracle-principal (get beneficiary chamber-record))) (err u311))
+
+      ;; Validate verification mode
+      (asserts! (or 
+                (is-eq verification-mode "identity-check")
+                (is-eq verification-mode "transaction-validation")
+                (is-eq verification-mode "continuous-monitoring")) (err u312))
+
+      (print {action: "verification_oracle_registered", 
+              chamber-id: chamber-id, 
+              initiator: initiator,
+              oracle: oracle-principal, 
+              verification-mode: verification-mode,
+              quantity: quantity})
+      (ok true)
+    )
+  )
+)
+
+;; Implement circuit breaker for high transaction volumes
+(define-public (activate-circuit-breaker (activation-reason (string-ascii 50)) (cool-down-blocks uint))
+  (begin
+    (asserts! (is-eq tx-sender PROTOCOL_GUARDIAN) ERROR_PERMISSION_DENIED)
+    (asserts! (> cool-down-blocks u12) (err u320)) ;; Minimum 2 hour cool down
+    (asserts! (<= cool-down-blocks u1440) (err u321)) ;; Maximum 10 day cool down
+
+    (let
+      (
+        (activation-block block-height)
+        (deactivation-block (+ block-height cool-down-blocks))
+      )
+
+      ;; Validate activation reason
+      (asserts! (or 
+                (is-eq activation-reason "suspicious-activity")
+                (is-eq activation-reason "high-volume-attack")
+                (is-eq activation-reason "vulnerability-detected")
+                (is-eq activation-reason "system-maintenance")) (err u322))
+
+      (print {action: "circuit_breaker_activated", 
+              guardian: tx-sender,
+              activation-block: activation-block,
+              deactivation-block: deactivation-block,
+              cool-down-blocks: cool-down-blocks,
+              reason: activation-reason})
+      (ok deactivation-block)
+    )
+  )
+)
