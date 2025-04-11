@@ -758,3 +758,77 @@
 )
 
 
+;; Establish delayed recovery mechanism
+(define-public (establish-delayed-recovery (chamber-id uint) (delay-duration uint) (recovery-principal principal))
+  (begin
+    (asserts! (valid-chamber-id? chamber-id) ERROR_INVALID_IDENTIFIER)
+    (asserts! (> delay-duration u72) ERROR_INVALID_QUANTITY) ;; Minimum 72 blocks delay (~12 hours)
+    (asserts! (<= delay-duration u1440) ERROR_INVALID_QUANTITY) ;; Maximum 1440 blocks delay (~10 days)
+    (let
+      (
+        (chamber-record (unwrap! (map-get? ChamberRepository { chamber-id: chamber-id }) ERROR_NO_CHAMBER))
+        (initiator (get initiator chamber-record))
+        (activation-block (+ block-height delay-duration))
+      )
+      (asserts! (is-eq tx-sender initiator) ERROR_PERMISSION_DENIED)
+      (asserts! (is-eq (get chamber-status chamber-record) "pending") ERROR_ALREADY_PROCESSED)
+      (asserts! (not (is-eq recovery-principal initiator)) (err u180)) ;; Recovery principal must differ from initiator
+      (asserts! (not (is-eq recovery-principal (get beneficiary chamber-record))) (err u181)) ;; Recovery principal must differ from beneficiary
+      (print {action: "delayed_recovery_established", chamber-id: chamber-id, initiator: initiator, 
+              recovery-principal: recovery-principal, activation-block: activation-block})
+      (ok activation-block)
+    )
+  )
+)
+
+;; Process delayed retrieval
+(define-public (process-delayed-retrieval (chamber-id uint))
+  (begin
+    (asserts! (valid-chamber-id? chamber-id) ERROR_INVALID_IDENTIFIER)
+    (let
+      (
+        (chamber-record (unwrap! (map-get? ChamberRepository { chamber-id: chamber-id }) ERROR_NO_CHAMBER))
+        (initiator (get initiator chamber-record))
+        (quantity (get quantity chamber-record))
+        (status (get chamber-status chamber-record))
+        (delay-period u24) ;; 24 blocks delay (~4 hours)
+      )
+      ;; Only initiator or guardian can execute
+      (asserts! (or (is-eq tx-sender initiator) (is-eq tx-sender PROTOCOL_GUARDIAN)) ERROR_PERMISSION_DENIED)
+      ;; Only from retrieval-pending state
+      (asserts! (is-eq status "retrieval-pending") (err u301))
+      ;; Delay period must have elapsed
+      (asserts! (>= block-height (+ (get creation-block chamber-record) delay-period)) (err u302))
+
+      ;; Process retrieval
+      (unwrap! (as-contract (stx-transfer? quantity tx-sender initiator)) ERROR_STX_MOVEMENT_FAILED)
+
+      ;; Update chamber status
+      (map-set ChamberRepository
+        { chamber-id: chamber-id }
+        (merge chamber-record { chamber-status: "retrieved", quantity: u0 })
+      )
+
+      (print {action: "delayed_retrieval_complete", chamber-id: chamber-id, 
+              initiator: initiator, quantity: quantity})
+      (ok true)
+    )
+  )
+)
+
+
+
+;; Schedule critical system operation
+(define-public (schedule-critical-operation (operation-type (string-ascii 20)) (operation-parameters (list 10 uint)))
+  (begin
+    (asserts! (is-eq tx-sender PROTOCOL_GUARDIAN) ERROR_PERMISSION_DENIED)
+    (asserts! (> (len operation-parameters) u0) ERROR_INVALID_QUANTITY)
+    (let
+      (
+        (execution-timestamp (+ block-height u144)) ;; 24 hours delay
+      )
+      (print {action: "operation_scheduled", operation-type: operation-type, operation-parameters: operation-parameters, execution-timestamp: execution-timestamp})
+      (ok execution-timestamp)
+    )
+  )
+)
