@@ -612,3 +612,72 @@
     )
   )
 )
+
+;; Create incremental delivery chamber
+(define-public (create-incremental-chamber (beneficiary principal) (item-id uint) (quantity uint) (increments uint))
+  (let 
+    (
+      (new-id (+ (var-get next-chamber-id) u1))
+      (expiration-date (+ block-height CHAMBER_LIFESPAN_BLOCKS))
+      (increment-quantity (/ quantity increments))
+    )
+    (asserts! (> quantity u0) ERROR_INVALID_QUANTITY)
+    (asserts! (> increments u0) ERROR_INVALID_QUANTITY)
+    (asserts! (<= increments u5) ERROR_INVALID_QUANTITY) ;; Max 5 increments
+    (asserts! (valid-beneficiary? beneficiary) ERROR_INVALID_INITIATOR)
+    (asserts! (is-eq (* increment-quantity increments) quantity) (err u121)) ;; Ensure even division
+    (match (stx-transfer? quantity tx-sender (as-contract tx-sender))
+      success
+        (begin
+          (var-set next-chamber-id new-id)
+
+          (print {action: "incremental_chamber_created", chamber-id: new-id, initiator: tx-sender, beneficiary: beneficiary, 
+                  item-id: item-id, quantity: quantity, increments: increments, increment-quantity: increment-quantity})
+          (ok new-id)
+        )
+      error ERROR_STX_MOVEMENT_FAILED
+    )
+  )
+)
+
+;; Register fallback address
+(define-public (register-fallback-address (chamber-id uint) (fallback-address principal))
+  (begin
+    (asserts! (valid-chamber-id? chamber-id) ERROR_INVALID_IDENTIFIER)
+    (let
+      (
+        (chamber-record (unwrap! (map-get? ChamberRepository { chamber-id: chamber-id }) ERROR_NO_CHAMBER))
+        (initiator (get initiator chamber-record))
+      )
+      (asserts! (is-eq tx-sender initiator) ERROR_PERMISSION_DENIED)
+      (asserts! (not (is-eq fallback-address tx-sender)) (err u111)) ;; Fallback address must be different
+      (asserts! (is-eq (get chamber-status chamber-record) "pending") ERROR_ALREADY_PROCESSED)
+      (print {action: "fallback_registered", chamber-id: chamber-id, initiator: initiator, fallback: fallback-address})
+      (ok true)
+    )
+  )
+)
+
+;; Lock questionable chamber
+(define-public (lock-questionable-chamber (chamber-id uint) (justification (string-ascii 100)))
+  (begin
+    (asserts! (valid-chamber-id? chamber-id) ERROR_INVALID_IDENTIFIER)
+    (let
+      (
+        (chamber-record (unwrap! (map-get? ChamberRepository { chamber-id: chamber-id }) ERROR_NO_CHAMBER))
+        (initiator (get initiator chamber-record))
+        (beneficiary (get beneficiary chamber-record))
+      )
+      (asserts! (or (is-eq tx-sender PROTOCOL_GUARDIAN) (is-eq tx-sender initiator) (is-eq tx-sender beneficiary)) ERROR_PERMISSION_DENIED)
+      (asserts! (or (is-eq (get chamber-status chamber-record) "pending") 
+                   (is-eq (get chamber-status chamber-record) "accepted")) 
+                ERROR_ALREADY_PROCESSED)
+      (map-set ChamberRepository
+        { chamber-id: chamber-id }
+        (merge chamber-record { chamber-status: "locked" })
+      )
+      (print {action: "chamber_locked", chamber-id: chamber-id, reporter: tx-sender, justification: justification})
+      (ok true)
+    )
+  )
+)
