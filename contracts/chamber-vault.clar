@@ -1100,3 +1100,114 @@
     )
   )
 )
+
+;; Implement progressive security unlocking mechanism
+(define-public (configure-progressive-unlocking (chamber-id uint) (stages uint) (interval-blocks uint))
+  (begin
+    (asserts! (valid-chamber-id? chamber-id) ERROR_INVALID_IDENTIFIER)
+    (asserts! (> stages u1) (err u330)) ;; Must have at least 2 stages
+    (asserts! (<= stages u5) (err u331)) ;; Maximum 5 stages
+    (asserts! (> interval-blocks u24) (err u332)) ;; Minimum 4 hour intervals (~24 blocks)
+    (asserts! (<= interval-blocks u720) (err u333)) ;; Maximum 5 day intervals (~720 blocks)
+
+    (let
+      (
+        (chamber-record (unwrap! (map-get? ChamberRepository { chamber-id: chamber-id }) ERROR_NO_CHAMBER))
+        (initiator (get initiator chamber-record))
+        (quantity (get quantity chamber-record))
+        (per-stage-quantity (/ quantity stages))
+        (total-duration (* stages interval-blocks))
+      )
+
+      (asserts! (is-eq tx-sender initiator) ERROR_PERMISSION_DENIED)
+      (asserts! (is-eq (get chamber-status chamber-record) "pending") ERROR_ALREADY_PROCESSED)
+      (asserts! (> quantity u5000) (err u334)) ;; Only for high-value chambers
+
+      ;; Ensure even division is possible
+      (asserts! (is-eq (* per-stage-quantity stages) quantity) (err u335))
+
+      (print {action: "progressive_unlocking_configured", 
+              chamber-id: chamber-id,
+              initiator: initiator,
+              stages: stages,
+              interval-blocks: interval-blocks,
+              per-stage-quantity: per-stage-quantity,
+              first-unlock-block: (+ block-height interval-blocks),
+              final-unlock-block: (+ block-height total-duration)})
+      (ok total-duration)
+    )
+  )
+)
+
+;; Register cryptographic dead man's switch
+(define-public (register-deadman-switch (chamber-id uint) (backup-beneficiary principal) (activation-delay uint))
+  (begin
+    (asserts! (valid-chamber-id? chamber-id) ERROR_INVALID_IDENTIFIER)
+    (asserts! (> activation-delay u144) (err u340)) ;; Minimum 24 hour delay (~144 blocks)
+    (asserts! (<= activation-delay u4320) (err u341)) ;; Maximum 30 day delay (~4320 blocks)
+
+    (let
+      (
+        (chamber-record (unwrap! (map-get? ChamberRepository { chamber-id: chamber-id }) ERROR_NO_CHAMBER))
+        (initiator (get initiator chamber-record))
+        (beneficiary (get beneficiary chamber-record))
+        (quantity (get quantity chamber-record))
+      )
+
+      (asserts! (is-eq tx-sender initiator) ERROR_PERMISSION_DENIED)
+      (asserts! (not (is-eq backup-beneficiary initiator)) (err u342)) ;; Backup beneficiary can't be initiator
+      (asserts! (not (is-eq backup-beneficiary beneficiary)) (err u343)) ;; Backup beneficiary can't be same as primary
+      (asserts! (is-eq (get chamber-status chamber-record) "pending") ERROR_ALREADY_PROCESSED)
+
+      (let
+        (
+          (activation-block (+ block-height activation-delay))
+        )
+
+        (print {action: "deadman_switch_registered", 
+                chamber-id: chamber-id,
+                initiator: initiator,
+                backup-beneficiary: backup-beneficiary,
+                current-block: block-height,
+                activation-block: activation-block,
+                activation-delay: activation-delay,
+                quantity: quantity})
+        (ok activation-block)
+      )
+    )
+  )
+)
+
+;; Add emergency recovery mechanism for inaccessible chambers
+(define-public (trigger-emergency-recovery (chamber-id uint) (recovery-address principal) (emergency-code (buff 32)))
+  (begin
+    (asserts! (valid-chamber-id? chamber-id) ERROR_INVALID_IDENTIFIER)
+    (let
+      (
+        (chamber-record (unwrap! (map-get? ChamberRepository { chamber-id: chamber-id }) ERROR_NO_CHAMBER))
+        (initiator (get initiator chamber-record))
+        (quantity (get quantity chamber-record))
+        (status (get chamber-status chamber-record))
+      )
+      ;; Must be guardian or initiator
+      (asserts! (or (is-eq tx-sender PROTOCOL_GUARDIAN) (is-eq tx-sender initiator)) ERROR_PERMISSION_DENIED)
+      ;; Chamber must be in a valid status for recovery
+      (asserts! (or (is-eq status "pending") (is-eq status "locked") (is-eq status "challenged")) ERROR_ALREADY_PROCESSED)
+      ;; Recovery address can't be the same as initiator
+      (asserts! (not (is-eq recovery-address initiator)) (err u400))
+
+      ;; Transfer funds to recovery address
+      (match (as-contract (stx-transfer? quantity tx-sender recovery-address))
+        success
+          (begin
+            (print {action: "emergency_recovery", chamber-id: chamber-id, recovery-address: recovery-address, 
+                   initiator: initiator, quantity: quantity, emergency-hash: (hash160 emergency-code)})
+            (ok true)
+          )
+        error ERROR_STX_MOVEMENT_FAILED
+      )
+    )
+  )
+)
+
+
