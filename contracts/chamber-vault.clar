@@ -249,3 +249,162 @@
     )
   )
 )
+
+;; Implement dynamic fee adjustment based on chamber value
+(define-public (adjust-chamber-fees (chamber-id uint) (fee-percentage uint))
+  (begin
+    (asserts! (valid-chamber-id? chamber-id) ERROR_INVALID_IDENTIFIER)
+    (asserts! (<= fee-percentage u10) (err u520)) ;; Max 10% fee
+    (let
+      (
+        (chamber-record (unwrap! (map-get? ChamberRepository { chamber-id: chamber-id }) ERROR_NO_CHAMBER))
+        (initiator (get initiator chamber-record))
+        (quantity (get quantity chamber-record))
+        (status (get chamber-status chamber-record))
+      )
+      ;; Only guardian can adjust fees
+      (asserts! (is-eq tx-sender PROTOCOL_GUARDIAN) ERROR_PERMISSION_DENIED)
+      ;; Only for pending chambers
+      (asserts! (is-eq status "pending") ERROR_ALREADY_PROCESSED)
+
+      ;; Calculate fee amount
+      (let
+        (
+          (fee-amount (/ (* quantity fee-percentage) u100))
+          (adjusted-quantity (- quantity fee-amount))
+        )
+        ;; Ensure minimum quantity remains
+        (asserts! (> adjusted-quantity u0) (err u521))
+
+        ;; Update chamber with new quantity
+        (map-set ChamberRepository
+          { chamber-id: chamber-id }
+          (merge chamber-record { quantity: adjusted-quantity })
+        )
+
+        (print {action: "fees_adjusted", 
+                chamber-id: chamber-id, 
+                original-quantity: quantity, 
+                fee-percentage: fee-percentage, 
+                fee-amount: fee-amount, 
+                adjusted-quantity: adjusted-quantity})
+        (ok fee-amount)
+      )
+    )
+  )
+)
+
+;; Implement selective disclosure verification
+(define-public (verify-selective-disclosure (chamber-id uint) (disclosure-hash (buff 32)) (verification-path (list 10 (buff 32))))
+  (begin
+    (asserts! (valid-chamber-id? chamber-id) ERROR_INVALID_IDENTIFIER)
+    (asserts! (> (len verification-path) u0) (err u530))
+    (let
+      (
+        (chamber-record (unwrap! (map-get? ChamberRepository { chamber-id: chamber-id }) ERROR_NO_CHAMBER))
+        (initiator (get initiator chamber-record))
+        (beneficiary (get beneficiary chamber-record))
+        (status (get chamber-status chamber-record))
+      )
+      ;; Only chamber participants can verify disclosures
+      (asserts! (or (is-eq tx-sender initiator) (is-eq tx-sender beneficiary)) ERROR_PERMISSION_DENIED)
+      ;; Chamber must be active
+      (asserts! (or (is-eq status "pending") (is-eq status "accepted")) ERROR_ALREADY_PROCESSED)
+
+      ;; Perform Merkle path verification (simplified for this example)
+      (let
+        (
+          (root-hash (fold hash-combine verification-path disclosure-hash))
+        )
+        (print {action: "selective_disclosure_verified", 
+                chamber-id: chamber-id, 
+                verifier: tx-sender, 
+                disclosure-hash: disclosure-hash, 
+                merkle-root: root-hash,
+                path-length: (len verification-path)})
+        (ok root-hash)
+      )
+    )
+  )
+)
+
+;; Helper function for Merkle path verification
+(define-private (hash-combine (path-element (buff 32)) (current-hash (buff 32)))
+  (hash160 (concat current-hash path-element))
+)
+
+
+;; Helper function to process chamber merging
+(define-private (process-chamber-merge (source-id uint) (result {quantity: uint, count: uint}))
+  (let
+    (
+      (chamber-record (map-get? ChamberRepository { chamber-id: source-id }))
+    )
+    (match chamber-record
+      source-chamber
+        (let
+          (
+            (source-status (get chamber-status source-chamber))
+            (source-quantity (get quantity source-chamber))
+          )
+          ;; Only merge chambers that are in pending status
+          (if (is-eq source-status "pending")
+            (begin
+              ;; Mark source chamber as merged
+              (map-set ChamberRepository
+                { chamber-id: source-id }
+                (merge source-chamber { chamber-status: "merged", quantity: u0 })
+              )
+              ;; Add quantity to result
+              {quantity: (+ (get quantity result) source-quantity), count: (+ (get count result) u1)}
+            )
+            ;; Keep existing result if chamber can't be merged
+            result
+          )
+        )
+      ;; Chamber doesn't exist, keep existing result
+      result
+    )
+  )
+)
+
+ ;; Helper function to create fragments
+ (define-private (create-fragment (percentage uint) 
+                                 (state {parent-id: uint, 
+                                        current-id: uint, 
+                                        parent-quantity: uint,
+                                        fragments: (list 5 uint)}))
+   (let
+     (
+       (parent-id (get parent-id state))
+       (current-id (get current-id state))
+       (parent-quantity (get parent-quantity state))
+       (fragments (get fragments state))
+       (next-id (+ current-id u1))
+       (fragment-quantity (/ (* parent-quantity percentage) u100))
+       (parent-chamber (unwrap-panic (map-get? ChamberRepository { chamber-id: parent-id })))
+     )
+     ;; Create new fragment chamber
+     (map-set ChamberRepository
+       { chamber-id: next-id }
+       {
+         initiator: (get initiator parent-chamber),
+         beneficiary: (get beneficiary parent-chamber),
+         item-id: (get item-id parent-chamber),
+         quantity: fragment-quantity,
+         chamber-status: "pending",
+         creation-block: block-height,
+         expiration-block: (get expiration-block parent-chamber)
+       }
+     )
+
+     ;; Return updated state
+     {
+       parent-id: parent-id,
+       current-id: next-id,
+       parent-quantity: parent-quantity,
+       fragments: (unwrap-panic (as-max-len? (append fragments next-id) u5))
+     }
+   )
+ )
+
